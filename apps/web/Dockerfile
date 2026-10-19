@@ -17,8 +17,17 @@ COPY packages/shared/package.json packages/shared/
 RUN pnpm install --frozen-lockfile
 
 COPY . .
-# 这里会先跑 vue-tsc —— 类型错就让镜像构建失败，别把坏代码打进去
-RUN pnpm --filter @notecloud/web run build
+
+# vue-tsc 峰值约 600MB，1GB 内存的机器会把 Node 堆打满（Reached heap limit）。
+# 默认仍做类型检查；内存不足时用 --build-arg TYPECHECK=0 跳过，
+# 只跑 vite build（峰值 < 512MB），类型检查交给 CI。
+ARG TYPECHECK=1
+ENV NODE_OPTIONS=--max-old-space-size=1024
+RUN if [ "$TYPECHECK" = "1" ]; then \
+      pnpm --filter @notecloud/web run build; \
+    else \
+      pnpm --filter @notecloud/web exec vite build; \
+    fi
 
 FROM nginx:1.27-alpine AS runtime
 

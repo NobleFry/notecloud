@@ -9,9 +9,10 @@
 # 它会做：
 #   1. 检查 Docker / compose / 端口占用（加 --install-deps 可自动装 Docker）
 #   2. 没有 .env 就生成一份（随机密码 + 随机 JWT 密钥）
-#   3. 构建并启动 nginx + api + mysql
-#   4. 等 api 健康，失败就打印日志
-#   5. 可选：装每日备份的 cron
+#   3. 内存不足时补 2GB swap（--no-swap 可跳过），并降低 MySQL buffer pool
+#   4. 构建并启动 nginx + api + mysql
+#   5. 等 api 健康，失败就打印日志
+#   6. 可选：装每日备份的 cron
 #
 # 不会做：申请 HTTPS 证书（需要域名与 80 端口，见 docs/DEPLOY.md §3）
 # ─────────────────────────────────────────────────────────────────
@@ -26,6 +27,7 @@ PORT=""
 WITH_BACKUP=0
 SKIP_BUILD=0
 INSTALL_DEPS=0
+NO_SWAP=0
 
 log()  { printf '\033[36m›\033[0m %s\n' "$*"; }
 ok()   { printf '\033[32m✓\033[0m %s\n' "$*"; }
@@ -38,8 +40,9 @@ while [[ $# -gt 0 ]]; do
     --port)         PORT="${2:?--port 需要一个值}"; shift 2 ;;
     --with-backup)  WITH_BACKUP=1; shift ;;
     --no-build)     SKIP_BUILD=1; shift ;;
+    --no-swap)      NO_SWAP=1; shift ;;
     --install-deps) INSTALL_DEPS=1; shift ;;
-    -h|--help)      sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help)      sed -n '2,17p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *)              die "未知参数：$1（用 --help 看用法）" ;;
   esac
 done
@@ -87,8 +90,34 @@ docker info >/dev/null 2>&1 || die "docker 守护进程不可用。
 command -v openssl >/dev/null 2>&1 || die "缺少 openssl（用来生成密钥）。Debian/Ubuntu: sudo apt-get install -y openssl"
 
 MEM_MB="$(awk '/MemTotal/ {printf "%d", $2/1024}' /proc/meminfo 2>/dev/null || echo 0)"
+SWAP_MB="$(awk '/SwapTotal/ {printf "%d", $2/1024}' /proc/meminfo 2>/dev/null || echo 0)"
+
+LOW_MEM=0
 if [[ "$MEM_MB" -gt 0 && "$MEM_MB" -lt 1800 ]]; then
-  warn "内存只有 ${MEM_MB}MB，MySQL + API 可能吃紧（建议 2GB 以上）"
+  LOW_MEM=1
+  warn "内存只有 ${MEM_MB}MB（建议 2GB 以上）"
+fi
+
+# 前端构建里 vue-tsc 峰值约 600MB，1GB 机器会把 Node 堆打满。
+# 内存不足且没有 swap 时补一个 2GB swapfile；--no-swap 可跳过。
+if [[ "$LOW_MEM" == "1" && "$SWAP_MB" -lt 1024 && "$NO_SWAP" == "0" ]]; then
+  if [[ "$(id -u)" -ne 0 ]]; then
+    warn "swap 只有 ${SWAP_MB}MB，构建可能内存不足。请以 root 执行："
+    warn "  fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile"
+    warn "  echo '/swapfile none swap sw 0 0' >> /etc/fstab"
+  else
+    log "swap 只有 ${SWAP_MB}MB，创建 2GB swapfile ..."
+    if [[ -e /swapfile ]]; then
+      swapon /swapfile 2>/dev/null || true
+    else
+      fallocate -l 2G /swapfile 2>/dev/null || dd if=/dev/zero of=/swapfile bs=1M count=2048 status=none
+      chmod 600 /swapfile
+      mkswap /swapfile >/dev/null
+      swapon /swapfile
+    fi
+    grep -qE '^/swapfile[[:space:]]' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+    ok "swap 已启用"
+  fi
 fi
 
 # ── 2. 生成 / 检查 .env ─────────────────────────────────────────
@@ -147,6 +176,11 @@ upsert_env() {
 upsert_env HTTP_PORT "$PORT"
 upsert_env PUBLIC_URL "$PUBLIC_URL"
 
+if [[ "$LOW_MEM" == "1" ]]; then
+  # 512MB buffer pool 在 1GB 机器上会和 Node 抢内存
+  upsert_env MYSQL_BUFFER_POOL 256M
+fi
+
 # 占位符还没替换掉（用户手工 cp 了模板）
 if grep -qE '__CHANGE_ME__|__GENERATE__' "$ENV_FILE"; then
   die ".env 里还有未替换的占位符（__CHANGE_ME__ / __GENERATE__）。请填好后重跑，或删掉 .env 让脚本重新生成"
@@ -162,8 +196,13 @@ if [[ "$SKIP_BUILD" == "1" ]]; then
   log "跳过构建，直接启动 ..."
   dc up -d
 else
+  BUILD_ARGS=()
+  if [[ "$LOW_MEM" == "1" ]]; then
+    warn "低内存模式：构建跳过类型检查（CI 会检查），MySQL buffer pool 用 256MB"
+    BUILD_ARGS+=(--build-arg TYPECHECK=0)
+  fi
   log "构建镜像（首次约 3~6 分钟）..."
-  dc build
+  dc build "${BUILD_ARGS[@]+"${BUILD_ARGS[@]}"}"
   log "启动服务 ..."
   dc up -d
 fi
@@ -171,7 +210,7 @@ fi
 # ── 5. 等健康 ───────────────────────────────────────────────────
 log "等待 MySQL 与 API 就绪 ..."
 healthy=0
-for _ in $(seq 1 90); do
+for _ in $(seq 1 150); do
   cid="$(dc ps -q api 2>/dev/null || true)"
   if [[ -n "$cid" ]]; then
     st="$(docker inspect -f '{{.State.Health.Status}}' "$cid" 2>/dev/null || echo none)"
@@ -185,7 +224,7 @@ done
 
 if [[ "$healthy" != "1" ]]; then
   echo
-  warn "API 没能在 180 秒内变为 healthy，最近 50 行日志："
+  warn "API 没能在 300 秒内变为 healthy，最近 50 行日志："
   dc logs --tail=50 api || true
   echo
   die "部署失败。常见原因：数据库密码含特殊字符、JWT_SECRET 太短、端口被占用"

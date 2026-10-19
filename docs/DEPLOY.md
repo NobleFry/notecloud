@@ -247,6 +247,28 @@ bash deploy/scripts/reset-password.sh you@example.com
 | 5~20 人 | 2 核 4 GB | 推荐 |
 | 附件多 | 加磁盘，不改内存 | 附件在 volume 里 |
 
+### 只有 1 GB 内存时
+
+可以跑，但要按下面处理，否则前端构建和运行时都可能 OOM：
+
+```bash
+# 1. 补 2GB swap（install.sh 在 root 下会自动做，--no-swap 可关闭）
+fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
+echo '/swapfile none swap sw 0 0' >> /etc/fstab
+
+# 2. 降低 MySQL 内存占用
+echo 'MYSQL_BUFFER_POOL=256M' >> .env
+```
+
+`install.sh` 检测到内存 < 1.8GB 时会自动补 swap、把 buffer pool 写进 `.env`，并在构建时加
+`--build-arg TYPECHECK=0` 跳过 `vue-tsc`（峰值约 600MB）。类型检查由 CI 负责，`vite build` 本身不到 512MB。
+
+手动构建时也可以显式指定：
+
+```bash
+docker compose --env-file .env -f deploy/compose/docker-compose.prod.yml build --build-arg TYPECHECK=0
+```
+
 ---
 
 ## 9. 已知限制
@@ -273,3 +295,4 @@ bash deploy/scripts/reset-password.sh you@example.com
 | **安全响应头重复** | 响应里两个 `X-Content-Type-Options`，前端/测试拿到 `nosniff, nosniff` | 反代里 `proxy_hide_header` 掉上游同名头 |
 | **`--frozen-lockfile` 失败** | 改了 package.json 但没更新 lockfile | 先在仓库根跑 `pnpm install` 再构建 |
 | **备份只 dump 数据库** | 恢复后所有图片变死链 | 备份脚本已把 `uploads` 一起打包 |
+| **1GB 内存构建前端 OOM** | `FATAL ERROR: Reached heap limit`，`vue-tsc` 在 ~478MB 崩溃 | 补 2GB swap + 构建加 `--build-arg TYPECHECK=0`（`install.sh` 会自动处理） |

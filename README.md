@@ -4,6 +4,8 @@
 
 面向 3~20 人小团队，数据完全掌握在自己手里。
 
+**项目地址**：<https://github.com/NobleFry/notecloud>
+
 ## 技术栈
 
 | 层 | 选型 |
@@ -36,6 +38,9 @@ NoteCloud/
 ## 快速开始
 
 ```bash
+git clone https://github.com/NobleFry/notecloud.git
+cd notecloud
+
 cp .env.example .env     # 填好数据库密码（已生成过一份可直接用的 .env）
 pnpm install
 pnpm dev:db              # 启动隔离的开发数据库（需先装 Docker，见 docs/DEV.md）

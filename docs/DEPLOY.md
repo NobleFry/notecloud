@@ -2,6 +2,7 @@
 
 > 目标读者：拿到仓库、在一台 Linux 服务器上部署 NoteCloud 的人。
 > 全流程只需 Docker，不需要装 Node / MySQL。
+> 仓库地址：<https://github.com/NobleFry/notecloud>
 
 ---
 

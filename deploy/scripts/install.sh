@@ -7,7 +7,7 @@
 #   bash deploy/scripts/install.sh --with-backup
 #
 # 它会做：
-#   1. 检查 Docker / compose / 端口占用
+#   1. 检查 Docker / compose / 端口占用（加 --install-deps 可自动装 Docker）
 #   2. 没有 .env 就生成一份（随机密码 + 随机 JWT 密钥）
 #   3. 构建并启动 nginx + api + mysql
 #   4. 等 api 健康，失败就打印日志
@@ -25,6 +25,7 @@ DOMAIN=""
 PORT=""
 WITH_BACKUP=0
 SKIP_BUILD=0
+INSTALL_DEPS=0
 
 log()  { printf '\033[36m›\033[0m %s\n' "$*"; }
 ok()   { printf '\033[32m✓\033[0m %s\n' "$*"; }
@@ -33,26 +34,57 @@ die()  { printf '\033[31m✗\033[0m %s\n' "$*" >&2; exit 1; }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --domain)      DOMAIN="${2:?--domain 需要一个值}"; shift 2 ;;
-    --port)        PORT="${2:?--port 需要一个值}"; shift 2 ;;
-    --with-backup) WITH_BACKUP=1; shift ;;
-    --no-build)    SKIP_BUILD=1; shift ;;
-    -h|--help)     sed -n '2,18p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
-    *)             die "未知参数：$1（用 --help 看用法）" ;;
+    --domain)       DOMAIN="${2:?--domain 需要一个值}"; shift 2 ;;
+    --port)         PORT="${2:?--port 需要一个值}"; shift 2 ;;
+    --with-backup)  WITH_BACKUP=1; shift ;;
+    --no-build)     SKIP_BUILD=1; shift ;;
+    --install-deps) INSTALL_DEPS=1; shift ;;
+    -h|--help)      sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *)              die "未知参数：$1（用 --help 看用法）" ;;
   esac
 done
 
 dc() { docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"; }
 
-# ── 1. 环境检查 ─────────────────────────────────────────────────
+# ── 1. 环境检查与依赖安装 ───────────────────────────────────────
 log "检查运行环境 ..."
 
-command -v docker >/dev/null 2>&1 || die "没有找到 docker。安装方式见 docs/DEPLOY.md §0"
-docker info >/dev/null 2>&1 || die "docker 守护进程不可用：sudo systemctl start docker（或当前用户在 docker 组吗？）"
-docker compose version >/dev/null 2>&1 || die "缺少 compose 插件：sudo pacman -S docker-compose / apt install docker-compose-plugin"
+need_docker=0
+command -v docker >/dev/null 2>&1 || need_docker=1
+docker compose version >/dev/null 2>&1 || need_docker=1
+
+if [[ "$need_docker" == "1" ]]; then
+  if [[ "$INSTALL_DEPS" == "1" ]]; then
+    log "缺少 Docker / Compose，开始安装依赖 ..."
+    bash "$ROOT/deploy/scripts/install-deps.sh"
+    echo
+    # 组权限对新会话才生效，当前 shell 通常还不能用
+    docker info >/dev/null 2>&1 || die "依赖已安装，但当前 shell 还没有 docker 权限。
+
+请执行下面任一操作后重跑本脚本：
+    newgrp docker      # 当前终端临时生效
+    注销并重新登录      # 永久生效"
+  else
+    die "缺少 Docker 或 compose 插件。两种方式：
+
+  1) 自动安装（Debian / Ubuntu / Arch，需要 sudo）：
+       bash deploy/scripts/install.sh --install-deps
+
+  2) 只装依赖：
+       bash deploy/scripts/install-deps.sh
+
+  3) 手动安装参考 docs/DEPLOY.md §0"
+  fi
+fi
+
+docker info >/dev/null 2>&1 || die "docker 守护进程不可用。
+
+  · 没启动？    sudo systemctl start docker
+  · 刚加入组？  newgrp docker 或重新登录
+  · 自检：      bash deploy/scripts/install-deps.sh --check"
 
 [[ -f "$COMPOSE_FILE" ]] || die "找不到 $COMPOSE_FILE"
-command -v openssl >/dev/null 2>&1 || die "缺少 openssl（用来生成密钥）"
+command -v openssl >/dev/null 2>&1 || die "缺少 openssl（用来生成密钥）。Debian/Ubuntu: sudo apt-get install -y openssl"
 
 MEM_MB="$(awk '/MemTotal/ {printf "%d", $2/1024}' /proc/meminfo 2>/dev/null || echo 0)"
 if [[ "$MEM_MB" -gt 0 && "$MEM_MB" -lt 1800 ]]; then

@@ -48,17 +48,72 @@ pnpm dev                 # API :3000 + Web :5173
 
 ### 生产部署
 
-```bash
-# 一键脚本：生成 .env（随机密钥）→ 构建 → 启动 → 等健康
-bash deploy/scripts/install.sh
+#### 1. 系统依赖（只在缺 Docker 时需要）
 
-# 有域名 + 每日备份
-bash deploy/scripts/install.sh --domain note.example.com --with-backup
+```bash
+bash deploy/scripts/install-deps.sh          # 需要 sudo
+bash deploy/scripts/install-deps.sh --check  # 只检查，不改系统
 ```
 
-脚本会打印访问地址。首次打开跳 `/setup` 创建站点管理员。
+支持 **Debian / Ubuntu**（含 Mint、Pop 等衍生版）与 **Arch / Manjaro**，自动安装：
 
-手动方式与完整说明（HTTPS、备份策略、升级与回滚、故障排查）见
+| 包 | 用途 |
+|---|---|
+| `docker-ce` / `docker` | 容器运行时 |
+| `docker-compose-plugin` / `docker-compose` | `docker compose` 命令 |
+| `openssl` | 生成随机密钥 |
+| `curl` | 镜像健康检查 |
+
+<details>
+<summary>不想用脚本？手动命令（Ubuntu / Debian 12+）</summary>
+
+```bash
+sudo apt-get update
+sudo apt-get install -y ca-certificates curl gnupg openssl
+sudo install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo tee /etc/apt/keyrings/docker.asc >/dev/null
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] \
+https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
+  | sudo tee /etc/apt/sources.list.d/docker.list
+
+sudo apt-get update
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io \
+                        docker-buildx-plugin docker-compose-plugin
+sudo systemctl enable --now docker
+sudo usermod -aG docker "$USER"
+newgrp docker        # 或注销重新登录
+```
+
+Debian 把上面两处 `ubuntu` 换成 `debian`。Arch：
+
+```bash
+sudo pacman -S --needed docker docker-compose docker-buildx openssl
+sudo systemctl enable --now docker
+sudo usermod -aG docker "$USER"
+newgrp docker
+```
+
+</details>
+
+#### 2. 部署
+
+```bash
+bash deploy/scripts/install.sh
+```
+
+脚本会自动生成带随机密钥的 `.env`、构建、启动、等健康，并打印访问地址。
+
+```bash
+bash deploy/scripts/install.sh --domain note.example.com --with-backup   # 有域名 + 每日备份
+bash deploy/scripts/install.sh --install-deps                            # 连 Docker 一起装
+bash deploy/scripts/install.sh --port 8081                               # 换端口
+```
+
+首次打开会跳 `/setup` 创建站点管理员。
+
+完整说明（HTTPS、备份策略、升级与回滚、故障排查）见
 **[docs/DEPLOY.md](docs/DEPLOY.md)**。
 
 开发环境搭建见 **[docs/DEV.md](docs/DEV.md)**，

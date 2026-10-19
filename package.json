@@ -34,6 +34,7 @@
 
     "deploy:up": "docker compose --env-file .env -f deploy/compose/docker-compose.prod.yml up -d --build",
     "deploy:install": "bash deploy/scripts/install.sh",
+    "deploy:deps": "bash deploy/scripts/install-deps.sh",
     "deploy:down": "docker compose --env-file .env -f deploy/compose/docker-compose.prod.yml down",
     "deploy:ps": "docker compose --env-file .env -f deploy/compose/docker-compose.prod.yml ps",
     "deploy:logs": "docker compose --env-file .env -f deploy/compose/docker-compose.prod.yml logs -f --tail=100",

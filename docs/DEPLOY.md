@@ -10,10 +10,26 @@
 | 项 | 要求 |
 |---|---|
 | Docker | 24+，带 compose 插件（`docker compose version` 能跑） |
-| 系统 | 任意 Linux（x86_64 / arm64） |
+| 系统 | Debian / Ubuntu（含衍生版）、Arch / Manjaro；其它发行版需手动装 Docker |
 | 内存 | 2 GB 起（MySQL 512MB buffer pool + API + Nginx） |
 | 磁盘 | 20 GB 起（数据库 + 附件，按团队规模加） |
 | 域名 | 可选；有域名才能上 HTTPS |
+
+**自动安装依赖**：
+
+```bash
+bash deploy/scripts/install-deps.sh          # Debian/Ubuntu/Arch，需要 sudo
+bash deploy/scripts/install-deps.sh --check   # 只检查
+```
+
+它用**官方 apt 仓库**装 Docker（不是 `curl get.docker.com | sh`，那样等于把 root
+交给远程脚本）。装完会把你加入 docker 组，需要 `newgrp docker` 或重新登录才生效。
+
+`install.sh` 也支持一步到位：
+
+```bash
+bash deploy/scripts/install.sh --install-deps
+```
 
 > **不支持 MariaDB/MariaDB 托管服务**：项目依赖 MySQL 8 的 `ngram` 全文解析器。
 > 用 `docker compose` 自带的 `mysql:8.4` 镜像最省事。

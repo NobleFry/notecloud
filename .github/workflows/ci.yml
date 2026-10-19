@@ -40,9 +40,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 版本由 package.json 的 packageManager 字段决定。
+      # 这里如果再写 version: 11，action 会报
+      # "Multiple versions of pnpm specified" 并直接失败。
       - uses: pnpm/action-setup@v4
-        with:
-          version: 11
 
       - uses: actions/setup-node@v4
         with:
@@ -63,17 +64,24 @@ jobs:
           pnpm --filter @notecloud/api exec prisma migrate deploy
           pnpm --filter @notecloud/api run db:ensure
 
-      - name: 端到端冒烟
+      - name: 启动 API
         run: |
-          pnpm --filter @notecloud/api exec tsx src/index.ts &
+          pnpm --filter @notecloud/api exec tsx src/index.ts > /tmp/api.log 2>&1 &
+          echo $! > /tmp/api.pid
           for _ in $(seq 1 60); do
-            curl -fsS http://127.0.0.1:3000/healthz && break
+            if curl -fsS http://127.0.0.1:3000/healthz; then
+              echo "API 就绪"
+              exit 0
+            fi
             sleep 1
           done
-          BASE=http://127.0.0.1:3000/api/v1 node deploy/scripts/smoke.mjs
+          echo "API 启动超时"
+          tail -80 /tmp/api.log
+          exit 1
+
+      - name: 端到端冒烟
+        run: BASE=http://127.0.0.1:3000/api/v1 node deploy/scripts/smoke.mjs
 
       - name: 失败时打印 API 日志
         if: failure()
-        run: |
-          echo '--- 最近日志 ---'
-          jobs -l || true
+        run: tail -100 /tmp/api.log || true

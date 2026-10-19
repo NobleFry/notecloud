@@ -44,13 +44,6 @@ async function restore(id: string): Promise<void> {
 }
 
 onMounted(loadDeleted);
-
-const roadmap = [
-  { title: '笔记', desc: 'Markdown 分栏编辑、笔记本树、标签、回收站、中文全文检索', milestone: 'M2' },
-  { title: '待办', desc: '任务分配、优先级、截止时间、今日与逾期视图、评论与 @提及', milestone: 'M3' },
-  { title: '看板', desc: '拖拽排序与跨列流转（卡片即任务）、WIP 限制、多视图', milestone: 'M4' },
-  { title: '同步与加固', desc: '增量同步、WebSocket 实时广播、分享链接、附件、通知中心', milestone: 'M5' },
-];
 </script>
 
 <template>
@@ -78,32 +71,6 @@ const roadmap = [
       </n-descriptions>
 
       <n-alert v-else type="warning" :bordered="false">还没有选择工作区。</n-alert>
-    </n-card>
-
-    <n-card title="M1 已完成的能力">
-      <ul style="margin: 0; padding-left: 20px; line-height: 1.9">
-        <li>账户体系：注册、登录、登出、Refresh Token 轮转与重放检测</li>
-        <li>安全：argon2id 密码哈希、会话设备管理、修改密码后吊销其它会话</li>
-        <li>工作区：创建、成员邀请（通用链接 / 指定邮箱）、四级角色权限</li>
-        <li>权限不变量：每个工作区至少一个所有者、不能移除所有者、转让所有权</li>
-        <li>审计日志：注册、建工作区、删工作区、移除成员、接受邀请</li>
-      </ul>
-    </n-card>
-
-    <n-card title="接下来的里程碑" style="margin-top: 16px">
-      <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px">
-        <div
-          v-for="item in roadmap"
-          :key="item.milestone"
-          style="border: 1px solid #efefef; border-radius: 8px; padding: 12px"
-        >
-          <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 6px">
-            <strong>{{ item.title }}</strong>
-            <n-tag size="tiny" :bordered="false">{{ item.milestone }}</n-tag>
-          </div>
-          <div class="nc-muted">{{ item.desc }}</div>
-        </div>
-      </div>
     </n-card>
   </div>
 </template>

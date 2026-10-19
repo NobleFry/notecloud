@@ -1,0 +1,47 @@
+{
+  "name": "notecloud",
+  "version": "0.1.0",
+  "private": true,
+  "description": "可自部署的前后端分离协作工作台：云同步笔记 + TodoList + 分类 + 看板",
+  "packageManager": "pnpm@11.28.5",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "pnpm -r --parallel run dev",
+    "build": "pnpm -r run build",
+    "typecheck": "pnpm -r run typecheck",
+    "test": "pnpm -r run test",
+
+    "dev:db": "bash deploy/scripts/devstack.sh up",
+    "dev:db:down": "bash deploy/scripts/devstack.sh down",
+    "dev:db:reset": "bash deploy/scripts/devstack.sh reset",
+    "dev:db:logs": "bash deploy/scripts/devstack.sh logs",
+    "dev:db:cli": "bash deploy/scripts/devstack.sh mysql",
+    "dev:db:check": "bash deploy/scripts/devstack.sh check",
+    "dev:tools": "bash deploy/scripts/devstack.sh up --profile tools",
+    "dev:mail": "bash deploy/scripts/devstack.sh up --profile mail",
+
+    "db:generate": "pnpm --filter @notecloud/api run db:generate",
+    "db:migrate": "pnpm --filter @notecloud/api run db:migrate",
+    "db:deploy": "pnpm --filter @notecloud/api run db:deploy",
+    "db:ensure": "pnpm --filter @notecloud/api run db:ensure",
+    "db:studio": "pnpm --filter @notecloud/api run db:studio",
+    "db:seed": "pnpm --filter @notecloud/api run db:seed",
+
+    "smoke": "node deploy/scripts/smoke.mjs",
+    "smoke:full": "bash deploy/scripts/smoke.sh",
+
+    "deploy:up": "docker compose --env-file .env -f deploy/compose/docker-compose.prod.yml up -d --build",
+    "deploy:install": "bash deploy/scripts/install.sh",
+    "deploy:down": "docker compose --env-file .env -f deploy/compose/docker-compose.prod.yml down",
+    "deploy:ps": "docker compose --env-file .env -f deploy/compose/docker-compose.prod.yml ps",
+    "deploy:logs": "docker compose --env-file .env -f deploy/compose/docker-compose.prod.yml logs -f --tail=100",
+    "deploy:backup": "bash deploy/scripts/backup.sh",
+    "deploy:restore": "bash deploy/scripts/restore.sh",
+    "deploy:upgrade": "bash deploy/scripts/upgrade.sh",
+    "deploy:reset-password": "bash deploy/scripts/reset-password.sh",
+
+    "setup": "pnpm install && pnpm dev:db && pnpm db:generate && pnpm db:migrate"
+  }
+}

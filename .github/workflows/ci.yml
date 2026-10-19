@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: notecloud_test
+          MYSQL_USER: notecloud
+          MYSQL_PASSWORD: notecloud
+        ports:
+          - 3307:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -proot --silent"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=24
+
+    env:
+      # 容器外的 API 用 127.0.0.1:3307 连（CI 里没有 docker 内网）
+      DATABASE_URL: mysql://notecloud:notecloud@127.0.0.1:3307/notecloud_test
+      TEST_DATABASE_URL: mysql://notecloud:notecloud@127.0.0.1:3307/notecloud_test
+      JWT_SECRET: ci-jwt-secret-ci-jwt-secret-ci-jwt-secret
+      NODE_ENV: test
+      API_PORT: 3000
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: 安装依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: 类型检查
+        run: pnpm -r run typecheck
+
+      - name: 构建
+        run: pnpm -r run build
+
+      - name: 数据库迁移
+        run: |
+          pnpm --filter @notecloud/api exec prisma migrate deploy
+          pnpm --filter @notecloud/api run db:ensure
+
+      - name: 端到端冒烟
+        run: |
+          pnpm --filter @notecloud/api exec tsx src/index.ts &
+          for _ in $(seq 1 60); do
+            curl -fsS http://127.0.0.1:3000/healthz && break
+            sleep 1
+          done
+          BASE=http://127.0.0.1:3000/api/v1 node deploy/scripts/smoke.mjs
+
+      - name: 失败时打印 API 日志
+        if: failure()
+        run: |
+          echo '--- 最近日志 ---'
+          jobs -l || true

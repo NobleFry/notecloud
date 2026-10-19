@@ -1,0 +1,89 @@
+# ─────────────────────────────────────────────────────────────────
+# NoteCloud 生产环境
+#
+#   cd deploy/compose
+#   docker compose --env-file ../../.env -f docker-compose.prod.yml up -d --build
+#
+# 或者用封装好的脚本：
+#   bash deploy/scripts/upgrade.sh
+# ─────────────────────────────────────────────────────────────────
+name: notecloud
+
+services:
+  mysql:
+    image: mysql:8.4
+    restart: unless-stopped
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+      # 中文全文检索：ngram 双字词。只读启动参数，改它必须重建索引
+      - --ngram_token_size=2
+      - --innodb-buffer-pool-size=512M
+      - --max-connections=200
+      - --default-time-zone=+00:00
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?请在 .env 中设置}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-notecloud}
+      MYSQL_USER: ${MYSQL_USER:-notecloud}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?请在 .env 中设置}
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - mysql-data:/var/lib/mysql
+    # ⚠️ 不对外发布端口：数据库只在 compose 网络内可达
+    healthcheck:
+      test:
+        ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 24
+      start_period: 40s
+    logging:
+      driver: json-file
+      options: { max-size: "20m", max-file: "3" }
+
+  api:
+    build:
+      context: ../..
+      dockerfile: apps/api/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - ../../.env
+    environment:
+      NODE_ENV: production
+      # 容器内用服务名连库；覆盖 .env 里的 127.0.0.1:3307
+      DATABASE_URL: mysql://${MYSQL_USER:-notecloud}:${MYSQL_PASSWORD}@mysql:3306/${MYSQL_DATABASE:-notecloud}
+      # 浏览器看到的站点地址，用于 CORS 与分享链接
+      WEB_ORIGIN: ${PUBLIC_URL:-http://localhost:8080}
+      UPLOAD_DIR: /data/uploads
+      # 入口脚本会先跑迁移；多副本时把其中一份设成 false
+      RUN_MIGRATIONS: ${RUN_MIGRATIONS:-true}
+    volumes:
+      - uploads:/data/uploads
+    depends_on:
+      mysql:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options: { max-size: "20m", max-file: "3" }
+
+  web:
+    build:
+      context: ../..
+      dockerfile: apps/web/Dockerfile
+    restart: unless-stopped
+    environment:
+      API_UPSTREAM: api:3000
+    ports:
+      - "${HTTP_PORT:-8080}:80"
+    depends_on:
+      api:
+        condition: service_started
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+volumes:
+  mysql-data:
+    name: notecloud-prod-mysql-data
+  uploads:
+    name: notecloud-prod-uploads

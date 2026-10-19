@@ -1,0 +1,791 @@
+// ─────────────────────────────────────────────────────────────────
+// NoteCloud — 数据库 Schema（M1：账户 + 工作区 + 成员 + 权限）
+//
+// 约定（全项目统一，后续模块沿用）：
+//   * 主键：cuid() 字符串，避免自增 ID 泄漏业务规模
+//   * 时间：一律存 UTC（连接串不设 timezone，由应用层做展示时区转换）
+//   * 软删除：业务实体带 deletedAt，删除 = 打时间戳；权限查询必须带 deletedAt: null
+//   * 乐观锁：需要防并发覆盖的实体带 version（Int），更新时 where version 匹配
+//   * 表名：snake_case（@@map），字段名：camelCase
+//   * 搜索：需要中文全文检索的字段在迁移里手写 FULLTEXT ... WITH PARSER ngram
+//
+// 迁移命令：
+//   pnpm --filter @notecloud/api exec prisma migrate dev --name init
+// ─────────────────────────────────────────────────────────────────
+
+generator client {
+  provider = "prisma-client"
+  // Prisma 7 起 output 是必填项，客户端不再默认生成到 node_modules
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "mysql"
+  // 注意：Prisma 7 起连接串不再写在 schema 里，改由 prisma.config.ts 提供
+}
+
+// ══════════════════════════════════════════════════════════════════
+// 枚举
+// ══════════════════════════════════════════════════════════════════
+
+/// 站点级角色（与工作区角色无关）
+enum SiteRole {
+  USER
+  ADMIN
+}
+
+enum UserStatus {
+  ACTIVE
+  DISABLED
+}
+
+/// 工作区角色，权限从高到低
+/// OWNER  : 工作区创建者，唯一，可转让/删除工作区
+/// ADMIN  : 管理成员与全部资源
+/// MEMBER : 管理自己创建的资源，可读工作区公开资源
+/// GUEST  : 仅能访问被显式分享的资源（数据模型先预留，M5 实现）
+enum WorkspaceRole {
+  OWNER
+  ADMIN
+  MEMBER
+  GUEST
+}
+
+enum EmailTokenType {
+  VERIFY_EMAIL
+  RESET_PASSWORD
+}
+
+enum InvitationStatus {
+  PENDING
+  ACCEPTED
+  EXPIRED
+  REVOKED
+}
+
+// ══════════════════════════════════════════════════════════════════
+// 账户
+// ══════════════════════════════════════════════════════════════════
+
+model User {
+  id           String     @id @default(cuid())
+  email        String     @unique @db.VarChar(255)
+  passwordHash String     @db.VarChar(255)
+  name         String     @db.VarChar(64)
+  avatarUrl    String?    @db.VarChar(512)
+  timezone     String     @default("Asia/Shanghai") @db.VarChar(64)
+  locale       String     @default("zh-CN") @db.VarChar(16)
+
+  /// 站点管理员（首个注册用户自动获得）
+  role   SiteRole   @default(USER)
+  status UserStatus @default(ACTIVE)
+
+  emailVerifiedAt DateTime?
+  lastLoginAt     DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  sessions        Session[]
+  emailTokens     EmailToken[]
+  memberships     WorkspaceMember[]
+  ownedWorkspaces Workspace[]       @relation("WorkspaceOwner")
+  sentInvitations Invitation[]      @relation("InvitationInviter")
+  auditLogs       AuditLog[]
+
+  notebooksCreated Notebook[] @relation("NotebookCreatedBy")
+  notesCreated     Note[]     @relation("NoteCreatedBy")
+  notesUpdated     Note[]     @relation("NoteUpdatedBy")
+
+  tasksAssigned Task[]    @relation("TaskAssignee")
+  tasksCreated  Task[]    @relation("TaskCreatedBy")
+  comments      Comment[] @relation("CommentAuthor")
+  boardsCreated Board[]   @relation("BoardCreatedBy")
+  attachments   Attachment[] @relation("AttachmentUploader")
+
+  notifications     Notification[] @relation("NotificationRecipient")
+  notificationsSent Notification[] @relation("NotificationActor")
+  taskWatching      TaskWatcher[]
+  shareLinks        ShareLink[]    @relation("ShareLinkCreator")
+  smartViews        SmartView[]    @relation("SmartViewCreator")
+  idempotencyKeys   IdempotencyKey[]
+
+  @@index([status])
+  @@index([role])
+  @@map("users")
+}
+
+/// Refresh Token 会话。不存明文 token，只存 sha256。
+/// familyId 用于"轮转 + 重放检测"：同一族的 token 被重复使用 → 整族吊销。
+model Session {
+  id           String    @id @default(cuid())
+  userId       String
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash    String    @unique @db.VarChar(128)
+  familyId     String    @db.VarChar(36)
+  userAgent    String?   @db.VarChar(512)
+  ip           String?   @db.VarChar(64)
+  expiresAt    DateTime
+  revokedAt    DateTime?
+  /// 轮转时指向新会话，便于追溯
+  replacedById String?   @db.VarChar(36)
+  lastUsedAt   DateTime  @default(now())
+  createdAt    DateTime  @default(now())
+
+  @@index([userId, revokedAt])
+  @@index([familyId])
+  @@index([expiresAt])
+  @@map("sessions")
+}
+
+/// 一次性邮件令牌（邮箱验证 / 重置密码）。同样只存 hash。
+model EmailToken {
+  id        String         @id @default(cuid())
+  userId    String
+  user      User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      EmailTokenType
+  tokenHash String         @unique @db.VarChar(128)
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime       @default(now())
+
+  @@index([userId, type])
+  @@index([expiresAt])
+  @@map("email_tokens")
+}
+
+// ══════════════════════════════════════════════════════════════════
+// 工作区 / 成员 / 邀请
+// ══════════════════════════════════════════════════════════════════
+
+/// 顶层容器。笔记/标签/看板/任务后续都挂在它下面。
+/// isPersonal = true 的是每个用户自动获得的「个人空间」，不可被他人加入。
+model Workspace {
+  id         String    @id @default(cuid())
+  name       String    @db.VarChar(64)
+  slug       String    @unique @db.VarChar(64)
+  icon       String?   @db.VarChar(32)
+  color      String?   @db.VarChar(16)
+  isPersonal Boolean   @default(false)
+
+  ownerId String
+  owner   User   @relation("WorkspaceOwner", fields: [ownerId], references: [id])
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  members     WorkspaceMember[]
+  invitations Invitation[]
+  notebooks   Notebook[]
+  notes       Note[]
+  tags        Tag[]
+  tasks       Task[]
+  comments    Comment[]
+  boards      Board[]
+  attachments Attachment[]
+  notifications Notification[]
+  shareLinks  ShareLink[]
+  smartViews  SmartView[]
+
+  @@index([ownerId])
+  @@index([deletedAt])
+  @@map("workspaces")
+}
+
+model WorkspaceMember {
+  id          String        @id @default(cuid())
+  workspaceId String
+  workspace   Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  userId      String
+  user        User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role        WorkspaceRole @default(MEMBER)
+
+  invitedById String?   @db.VarChar(36)
+  joinedAt    DateTime  @default(now())
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  /// 一个用户在一个工作区里只能有一条成员记录
+  @@unique([workspaceId, userId])
+  @@index([userId])
+  @@index([workspaceId, role])
+  @@map("workspace_members")
+}
+
+/// 邀请。email 为空 = 通用邀请链接（谁拿到谁能用，受 maxUses 限制）；
+/// email 非空 = 指定邮箱邀请，只有该邮箱注册/登录后可接受。
+model Invitation {
+  id          String           @id @default(cuid())
+  workspaceId String
+  workspace   Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  email       String?          @db.VarChar(255)
+  role        WorkspaceRole    @default(MEMBER)
+  tokenHash   String           @unique @db.VarChar(128)
+  status      InvitationStatus @default(PENDING)
+
+  invitedById String
+  invitedBy   User   @relation("InvitationInviter", fields: [invitedById], references: [id])
+
+  maxUses    Int      @default(1)
+  uses       Int      @default(0)
+  expiresAt  DateTime
+  acceptedAt DateTime?
+  revokedAt  DateTime?
+  createdAt  DateTime @default(now())
+
+  @@index([workspaceId, status])
+  @@index([email])
+  @@index([expiresAt])
+  @@map("invitations")
+}
+
+// ══════════════════════════════════════════════════════════════════
+// 系统
+// ══════════════════════════════════════════════════════════════════
+
+/// 站点配置（key-value）。首次启动引导写入 registration.enabled 等。
+model SiteSetting {
+  key         String   @id @db.VarChar(64)
+  value       Json
+  updatedById String?  @db.VarChar(36)
+  updatedAt   DateTime @updatedAt
+
+  @@map("site_settings")
+}
+
+/// 审计日志：管理员操作 + 敏感操作（改权限、删工作区、重置密码…）
+model AuditLog {
+  id          String   @id @default(cuid())
+  actorId     String?
+  actor       User?    @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  action      String   @db.VarChar(64)
+  targetType  String?  @db.VarChar(32)
+  targetId    String?  @db.VarChar(36)
+  workspaceId String?  @db.VarChar(36)
+  meta        Json?
+  ip          String?  @db.VarChar(64)
+  userAgent   String?  @db.VarChar(512)
+  createdAt   DateTime @default(now())
+
+  @@index([actorId, createdAt])
+  @@index([workspaceId, createdAt])
+  @@index([action, createdAt])
+  @@map("audit_logs")
+}
+
+// ══════════════════════════════════════════════════════════════════
+// M2：笔记 / 笔记本 / 标签
+// ══════════════════════════════════════════════════════════════════
+
+enum ResourceVisibility {
+  /// 仅创建者可见
+  PRIVATE
+  /// 工作区成员可见（团队默认）
+  WORKSPACE
+}
+
+/// 笔记本：树形结构。
+/// 删除一律软删（deletedAt）；删除笔记本只解除与笔记的关联，不删笔记。
+model Notebook {
+  id          String    @id @default(cuid())
+  workspaceId String
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  parentId String?
+  parent   Notebook?  @relation("NotebookTree", fields: [parentId], references: [id], onDelete: Restrict)
+  children Notebook[] @relation("NotebookTree")
+
+  name     String  @db.VarChar(64)
+  icon     String? @db.VarChar(32)
+  color    String? @db.VarChar(16)
+  /// 同级排序。拖拽后服务端按 orderedIds 整体重排写入
+  position Int     @default(0)
+  /// 深度，0 = 根。仅用于限制层级与前端缩进，权威结构以 parentId 为准
+  depth    Int     @default(0)
+
+  createdById String
+  createdBy   User   @relation("NotebookCreatedBy", fields: [createdById], references: [id])
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  notes NoteNotebook[]
+
+  @@index([workspaceId, parentId, position])
+  @@index([workspaceId, deletedAt])
+  @@map("notebooks")
+}
+
+/// 笔记。正文是 Markdown 原文，渲染在客户端完成。
+model Note {
+  id          String    @id @default(cuid())
+  workspaceId String
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  title   String  @db.VarChar(255)
+  content String  @db.LongText
+  /// 列表页摘要（剥掉 Markdown 标记后的纯文本，服务端截断）
+  excerpt String? @db.VarChar(300)
+
+  visibility ResourceVisibility @default(WORKSPACE)
+  isPinned   Boolean            @default(false)
+  isStarred  Boolean            @default(false)
+  archivedAt DateTime?
+
+  /// 乐观锁。客户端保存时带上 version，不匹配返回 40900 + 服务端最新内容
+  version Int @default(1)
+
+  createdById String
+  createdBy   User   @relation("NoteCreatedBy", fields: [createdById], references: [id])
+  updatedById String?
+  updatedBy   User?  @relation("NoteUpdatedBy", fields: [updatedById], references: [id], onDelete: SetNull)
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  notebooks NoteNotebook[]
+  tags      NoteTag[]
+
+  @@index([workspaceId, deletedAt, updatedAt])
+  @@index([workspaceId, isStarred])
+  @@index([workspaceId, archivedAt])
+  @@map("notes")
+}
+
+/// 笔记 ↔ 笔记本 多对多（已确认：一条笔记可属于多个笔记本）
+model NoteNotebook {
+  noteId     String
+  note       Note     @relation(fields: [noteId], references: [id], onDelete: Cascade)
+  notebookId String
+  notebook   Notebook @relation(fields: [notebookId], references: [id], onDelete: Cascade)
+
+  @@id([noteId, notebookId])
+  @@index([notebookId])
+  @@map("note_notebooks")
+}
+
+model Tag {
+  id          String    @id @default(cuid())
+  workspaceId String
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  name  String  @db.VarChar(32)
+  color String? @db.VarChar(16)
+
+  createdAt DateTime @default(now())
+
+  notes NoteTag[]
+  tasks TaskTag[]
+
+  @@unique([workspaceId, name])
+  @@index([workspaceId])
+  @@map("tags")
+}
+
+model NoteTag {
+  noteId String
+  note   Note   @relation(fields: [noteId], references: [id], onDelete: Cascade)
+  tagId  String
+  tag    Tag    @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([noteId, tagId])
+  @@index([tagId])
+  @@map("note_tags")
+}
+
+// ══════════════════════════════════════════════════════════════════
+// M3：待办任务 / 子任务 / 评论
+//
+// 注意：任务**没有 Project 层**（已确认）。分组靠 status + tags + 截止时间；
+// M4 的看板会给 tasks 加 boardId / columnId，列直接映射 status，不另建卡片表。
+// ══════════════════════════════════════════════════════════════════
+
+enum TaskStatus {
+  TODO
+  IN_PROGRESS
+  DONE
+  CANCELED
+}
+
+enum TaskPriority {
+  NONE
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+model Task {
+  id          String    @id @default(cuid())
+  workspaceId String
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  title       String  @db.VarChar(255)
+  description String? @db.Text
+
+  status   TaskStatus   @default(TODO)
+  priority TaskPriority @default(NONE)
+
+  /// 起止时间。isAllDay=true 表示只关心日期，时间部分不展示
+  startAt  DateTime?
+  dueAt    DateTime?
+  isAllDay Boolean   @default(true)
+
+  completedAt DateTime?
+  canceledAt  DateTime?
+
+  /// 同状态内的人工排序。M3 列表按截止时间排，M4 看板拖拽才真正用上它
+  position Int @default(0)
+
+  /// 所在的看板列。null = 不在任何看板上（仍会出现在待办视图里）
+  columnId String?
+  column   BoardColumn? @relation(fields: [columnId], references: [id], onDelete: SetNull)
+
+  assigneeId String?
+  assignee   User?   @relation("TaskAssignee", fields: [assigneeId], references: [id], onDelete: SetNull)
+  createdById String
+  createdBy   User   @relation("TaskCreatedBy", fields: [createdById], references: [id])
+
+  /// 乐观锁：与笔记同一套协议
+  version Int @default(1)
+
+  /// 提醒时间。定时任务扫到 due 且未发过通知时投递，然后写 reminderSentAt
+  reminderAt     DateTime?
+  reminderSentAt DateTime?
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  checklists TaskChecklist[]
+  tags       TaskTag[]
+  watchers   TaskWatcher[]
+
+  @@index([workspaceId, deletedAt, status])
+  @@index([workspaceId, dueAt])
+  @@index([workspaceId, assigneeId])
+  @@index([workspaceId, updatedAt])
+  @@index([columnId, position])
+  @@index([reminderAt])
+  @@map("tasks")
+}
+
+/// 子任务清单。只做一层，不嵌套（嵌套子任务在 UI 上收益远小于复杂度）
+model TaskChecklist {
+  id     String @id @default(cuid())
+  taskId String
+  task   Task   @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  title    String  @db.VarChar(255)
+  done     Boolean @default(false)
+  position Int     @default(0)
+
+  @@index([taskId, position])
+  @@map("task_checklists")
+}
+
+/// 任务 ↔ 标签。复用工作区级的同一套 Tag，笔记与任务共享标签体系
+model TaskTag {
+  taskId String
+  task   Task   @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  tagId  String
+  tag    Tag    @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([taskId, tagId])
+  @@index([tagId])
+  @@map("task_tags")
+}
+
+enum CommentTargetType {
+  TASK
+  NOTE
+}
+
+/// 评论。多态目标（task / note），不建外键 —— 目标被硬删除时由业务层清理。
+/// 用 (workspaceId, targetType, targetId) 做索引，保证按目标查询走索引。
+model Comment {
+  id          String    @id @default(cuid())
+  workspaceId String
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  targetType CommentTargetType
+  targetId   String           @db.VarChar(191)
+
+  body String @db.Text
+  /// 被 @ 的 userId 数组。M3 只用于前端高亮，M5 的通知会复用它
+  mentions Json?
+
+  authorId String
+  author   User   @relation("CommentAuthor", fields: [authorId], references: [id])
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  @@index([workspaceId, targetType, targetId])
+  @@index([authorId])
+  @@map("comments")
+}
+
+// ══════════════════════════════════════════════════════════════════
+// M4：看板
+//
+// 方案 A（已确认）：**卡片就是任务**，看板的列只是任务的一个视图维度。
+//   * 不建 cards 表
+//   * 拖进某一列 = 把 tasks.columnId 改成该列 + 把 status 改成该列的 status
+//   * 因此待办列表与看板天然同步，不存在"两边数据不一致"
+// ══════════════════════════════════════════════════════════════════
+
+model Board {
+  id          String    @id @default(cuid())
+  workspaceId String
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  name        String  @db.VarChar(64)
+  description String? @db.VarChar(500)
+  icon        String? @db.VarChar(32)
+  color       String? @db.VarChar(16)
+
+  createdById String
+  createdBy   User   @relation("BoardCreatedBy", fields: [createdById], references: [id])
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  columns BoardColumn[]
+
+  @@index([workspaceId, deletedAt])
+  @@map("boards")
+}
+
+model BoardColumn {
+  id      String @id @default(cuid())
+  boardId String
+  board   Board  @relation(fields: [boardId], references: [id], onDelete: Cascade)
+
+  name String @db.VarChar(64)
+
+  /// 这一列映射到哪个任务状态。拖进这一列就等于把任务改成这个状态
+  status   TaskStatus @default(TODO)
+  position Int        @default(0)
+  color    String?    @db.VarChar(16)
+
+  /// WIP（在制品）上限；null 表示不限
+  wipLimit Int?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tasks Task[]
+
+  @@index([boardId, position])
+  @@map("board_columns")
+}
+
+// ══════════════════════════════════════════════════════════════════
+// M5-A：附件
+//
+// 访问控制用「能力链接」：URL 里带一个随机 token，拿到链接就能看。
+// 这是刻意的取舍 —— Markdown 里的 <img> 无法携带 Bearer token，
+// 若要求登录态就必须改写渲染逻辑；对自部署团队工具来说，
+// 不可猜测的 URL 已经足够（等同 Google Docs 的"知道链接即可访问"）。
+// ══════════════════════════════════════════════════════════════════
+
+model Attachment {
+  id          String    @id @default(cuid())
+  workspaceId String
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  /// 能力令牌。URL: /api/v1/attachments/:id/:token
+  token String @unique @db.VarChar(64)
+
+  /// 用户上传时的原始文件名（仅用于下载时还原）
+  filename   String @db.VarChar(255)
+  mimeType   String @db.VarChar(127)
+  /// 字节数
+  size       Int
+  /// 存储层里的相对路径（由服务端生成，不含用户输入）
+  storageKey String @db.VarChar(512)
+
+  uploaderId String
+  uploader   User   @relation("AttachmentUploader", fields: [uploaderId], references: [id])
+
+  createdAt DateTime  @default(now())
+  deletedAt DateTime?
+
+  @@index([workspaceId, createdAt])
+  @@index([createdAt])
+  @@map("attachments")
+}
+
+// ══════════════════════════════════════════════════════════════════
+// M5-B：通知 / 关注者
+//
+// 通知是「站内信」：写入即持久化，前端轮询未读数。
+// 不做邮件与 Web Push（那些需要 SMTP / VAPID，等以后）。
+// ══════════════════════════════════════════════════════════════════
+
+enum NotificationType {
+  /// 评论里 @了我
+  MENTION
+  /// 任务指派给我
+  TASK_ASSIGNED
+  /// 我关注（或创建/负责）的任务有新评论
+  TASK_COMMENT
+  /// 任务提醒到达
+  TASK_DUE
+}
+
+model Notification {
+  id          String    @id @default(cuid())
+  workspaceId String
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  recipientId String
+  recipient   User   @relation("NotificationRecipient", fields: [recipientId], references: [id], onDelete: Cascade)
+
+  /// 触发者。系统通知（如到期提醒）为 null
+  actorId String?
+  actor   User?   @relation("NotificationActor", fields: [actorId], references: [id], onDelete: SetNull)
+
+  type NotificationType
+
+  /// 关联资源（多态，不建外键）
+  targetType String? @db.VarChar(32)
+  targetId   String? @db.VarChar(191)
+
+  title String  @db.VarChar(255)
+  body  String? @db.VarChar(500)
+  /// 点击后跳转的前端路径，例如 /w/<id>/tasks?task=<id>
+  link  String? @db.VarChar(500)
+
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([recipientId, readAt, createdAt])
+  @@index([recipientId, createdAt])
+  @@map("notifications")
+}
+
+/// 任务关注者。被 @、被指派、或者手动点"关注"都会进来。
+/// 有评论时通知他们 —— 这就是"协作人"的实际作用。
+model TaskWatcher {
+  taskId String
+  task   Task   @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@id([taskId, userId])
+  @@index([userId])
+  @@map("task_watchers")
+}
+
+// ══════════════════════════════════════════════════════════════════
+// M5-C：变更日志（增量同步的地基）
+//
+// 每次笔记/任务/看板发生写入，就追加一行。客户端带 since=<seq> 拉取，
+// 拿到"我离线期间发生了什么"。真正的离线合并还需要客户端状态机，
+// 这一步先把服务端的部分做扎实。
+// ══════════════════════════════════════════════════════════════════
+
+model SyncChange {
+  /// 自增游标。用 BigInt 避免长期运行后溢出，序列化成字符串给前端
+  seq         BigInt   @id @default(autoincrement())
+  workspaceId String   @db.VarChar(191)
+  /// note | task | board | notebook
+  entityType  String   @db.VarChar(32)
+  entityId    String   @db.VarChar(191)
+  /// upsert | delete
+  op          String   @db.VarChar(16)
+  /// 乐观锁版本号（删除时为 null）
+  version     Int?
+  changedAt   DateTime @default(now())
+
+  @@index([workspaceId, seq])
+  @@map("sync_changes")
+}
+
+// ══════════════════════════════════════════════════════════════════
+// M5-D：分享链接 / 智能视图
+// ══════════════════════════════════════════════════════════════════
+
+/// 公开只读分享。能力链接（随机 token），可选过期时间。
+/// M5-D 只支持笔记；看板分享留到以后。
+model ShareLink {
+  id          String    @id @default(cuid())
+  token       String    @unique @db.VarChar(64)
+  workspaceId String
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  /// 目前只有 note
+  resourceType String @db.VarChar(16)
+  resourceId   String @db.VarChar(191)
+
+  createdById String
+  createdBy   User   @relation("ShareLinkCreator", fields: [createdById], references: [id])
+
+  expiresAt DateTime?
+  revokedAt DateTime?
+  viewCount Int       @default(0)
+  createdAt DateTime  @default(now())
+
+  @@index([workspaceId, resourceType, resourceId])
+  @@map("share_links")
+}
+
+/// 保存的过滤器。isShared=true 时工作区所有成员可见。
+model SmartView {
+  id          String    @id @default(cuid())
+  workspaceId String
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  name  String  @db.VarChar(64)
+  icon  String? @db.VarChar(16)
+  /// 过滤条件，结构见 SmartViewFilter
+  filter Json
+
+  isShared Boolean @default(false)
+  ownerId  String? @db.VarChar(191)
+  position Int     @default(0)
+
+  createdById String
+  createdBy   User   @relation("SmartViewCreator", fields: [createdById], references: [id])
+
+  createdAt DateTime @default(now())
+
+  @@index([workspaceId, position])
+  @@map("smart_views")
+}
+
+// ══════════════════════════════════════════════════════════════════
+// M1 补全：幂等键
+//
+// 客户端带 `Idempotency-Key` 请求头重放同一个写操作时，直接返回第一次的响应，
+// 避免"点两下创建出两条记录"。24 小时后过期，由定时任务清理。
+// ══════════════════════════════════════════════════════════════════
+
+model IdempotencyKey {
+  id       String @id @default(cuid())
+  userId   String
+  user     User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  key      String @db.VarChar(128)
+  /// "POST /api/v1/workspaces/:id/notes" 这种形状
+  endpoint String @db.VarChar(191)
+
+  /// 首次成功响应的 JSON；为空表示还在处理中
+  response Json?
+  status   Int?
+
+  createdAt DateTime @default(now())
+  expiresAt DateTime
+
+  @@unique([userId, key, endpoint])
+  @@index([expiresAt])
+  @@map("idempotency_keys")
+}

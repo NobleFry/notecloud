@@ -1,0 +1,88 @@
+# NoteCloud — 隔离开发环境（基础设施）
+#
+# 用法：
+#   pnpm dev:db            # 启动 MySQL 8.4（+ 依赖）
+#   pnpm dev:db:down       # 停止
+#   pnpm dev:tools         # 额外启动 Adminer
+#   pnpm dev:mail          # 额外启动 Mailpit（本地邮件捕获）
+#
+# 设计要点：
+#   * 与宿主机 MariaDB 完全隔离 —— 独立镜像、独立端口(3307)、独立命名卷
+#   * 端口只绑定 127.0.0.1，不暴露到局域网
+#   * 生产环境跑 MySQL 8.4，开发环境一致，避免 ngram / 排序规则行为分叉
+name: notecloud-dev
+
+services:
+  mysql:
+    image: mysql:8.4
+    container_name: notecloud-mysql-dev
+    restart: unless-stopped
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+      # 中文全文检索：ngram 分词长度 2（双字词）
+      - --ngram_token_size=2
+      - --innodb-buffer-pool-size=512M
+      - --max-connections=150
+      # 统一存 UTC，由应用层负责展示时区
+      - --default-time-zone=+00:00
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?请在 .env 中设置 MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-notecloud}
+      MYSQL_USER: ${MYSQL_USER:-notecloud}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?请在 .env 中设置 MYSQL_PASSWORD}
+      TZ: ${TZ:-Asia/Shanghai}
+    ports:
+      - "127.0.0.1:${MYSQL_PORT:-3307}:3306"
+    volumes:
+      - mysql-dev-data:/var/lib/mysql
+      - ./init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test:
+        ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 30s
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  # ── 以下两个默认不启动，用 --profile 按需开启 ──────────────────────
+  # 项目走真实 SMTP，但本地调试邮件模板时 Mailpit 仍然很方便：
+  #   pnpm dev:mail   →  http://127.0.0.1:8025
+  mailpit:
+    image: axllent/mailpit:latest
+    container_name: notecloud-mailpit-dev
+    profiles: ["mail"]
+    restart: unless-stopped
+    environment:
+      MP_SMTP_AUTH_ACCEPT_ANY: 1
+      MP_SMTP_AUTH_ALLOW_INSECURE: 1
+    ports:
+      - "127.0.0.1:1025:1025" # SMTP
+      - "127.0.0.1:8025:8025" # Web UI
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  # 数据库 Web 客户端：pnpm dev:tools  →  http://127.0.0.1:8080
+  adminer:
+    image: adminer:latest
+    container_name: notecloud-adminer-dev
+    profiles: ["tools"]
+    restart: unless-stopped
+    environment:
+      ADMINER_DEFAULT_SERVER: mysql
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+volumes:
+  mysql-dev-data:
+    name: notecloud-dev-mysql-data

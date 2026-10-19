@@ -1,0 +1,23 @@
+# 构建上下文忽略项（Docker 用）
+# 注意：.env 绝不能进镜像 —— 密钥由 compose 注入
+
+node_modules
+**/node_modules
+
+.git
+.github
+
+dist
+**/dist
+
+.dev
+data
+backups
+
+.env
+.env.*
+!.env.example
+
+*.log
+coverage
+.DS_Store

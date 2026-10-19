@@ -1,0 +1,16 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "types": ["node"],
+    "lib": ["ES2023"],
+    // @node-rs/argon2 的 d.ts 用了 ambient const enum（Algorithm），
+    // verbatimModuleSyntax 下无法访问，故在服务端关闭它
+    "verbatimModuleSyntax": false,
+    "paths": {
+      "@notecloud/shared": ["../../packages/shared/src/index.ts"]
+    }
+  },
+  "include": ["src", "prisma", "scripts", "prisma.config.ts", "tsup.config.ts"],
+  "exclude": ["dist", "src/generated"]
+}

@@ -104,6 +104,22 @@ docker compose --env-file .env -f deploy/compose/docker-compose.prod.yml ps
 > **迁移是自动的**：API 容器的入口脚本会先跑 `prisma migrate deploy` +
 > 全文索引自愈，再启动服务。迁移失败容器会直接退出，不会带病运行。
 
+### 2.1 日常启停与检测
+
+```bash
+bash deploy/scripts/service.sh            # 状态检测（默认）
+bash deploy/scripts/service.sh start      # 启动
+bash deploy/scripts/service.sh stop       # 停止（保留容器与数据）
+bash deploy/scripts/service.sh restart    # 重启
+bash deploy/scripts/service.sh down       # 删除容器（保留数据卷）
+bash deploy/scripts/service.sh logs api -f
+bash deploy/scripts/service.sh check      # 环境自检
+```
+
+`status` 同时检查容器健康状态和对外 HTTP（`/api/v1/site/status`、`/`）；
+`check` 检查 Docker、compose、`.env`、端口、内存与 swap。
+两者异常时返回 1（环境缺失返回 2），可直接用于监控脚本或 systemd timer。
+
 ---
 
 ## 3. 上 HTTPS（有域名时）

@@ -118,6 +118,20 @@ bash deploy/scripts/install.sh --port 8081                               # 换�
 
 首次打开会跳 `/setup` 创建站点管理员。
 
+#### 3. 日常启停
+
+```bash
+bash deploy/scripts/service.sh            # 状态检测：容器健康 + HTTP 探测
+bash deploy/scripts/service.sh start      # 启动
+bash deploy/scripts/service.sh stop       # 停止（保留容器与数据）
+bash deploy/scripts/service.sh restart    # 重启
+bash deploy/scripts/service.sh down       # 删除容器（保留数据卷）
+bash deploy/scripts/service.sh logs api -f
+bash deploy/scripts/service.sh check      # 环境自检
+```
+
+`status` / `check` 异常时返回非 0，可直接用于监控。
+
 完整说明（HTTPS、备份策略、升级与回滚、故障排查）见
 **[docs/DEPLOY.md](docs/DEPLOY.md)**。
 

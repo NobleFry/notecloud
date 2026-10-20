@@ -259,9 +259,10 @@ echo
 echo "  首次打开会跳转 /setup，创建的第一个账号是站点管理员。"
 echo
 echo "  常用命令："
-echo "    dc() { docker compose --env-file .env -f deploy/compose/docker-compose.prod.yml \"\$@\"; }"
-echo "    dc ps"
-echo "    dc logs -f api"
+echo "    bash deploy/scripts/service.sh status   # 状态检测"
+echo "    bash deploy/scripts/service.sh stop     # 停止服务"
+echo "    bash deploy/scripts/service.sh start    # 启动服务"
+echo "    bash deploy/scripts/service.sh logs api -f"
 echo "    bash deploy/scripts/backup.sh"
 echo "    bash deploy/scripts/upgrade.sh"
 echo

@@ -312,3 +312,4 @@ docker compose --env-file .env -f deploy/compose/docker-compose.prod.yml build -
 | **`--frozen-lockfile` 失败** | 改了 package.json 但没更新 lockfile | 先在仓库根跑 `pnpm install` 再构建 |
 | **备份只 dump 数据库** | 恢复后所有图片变死链 | 备份脚本已把 `uploads` 一起打包 |
 | **1GB 内存构建前端 OOM** | `FATAL ERROR: Reached heap limit`，`vue-tsc` 在 ~478MB 崩溃 | 补 2GB swap + 构建加 `--build-arg TYPECHECK=0`（`install.sh` 会自动处理） |
+| **MySQL 重启后 API 连不上** | `pool failed to retrieve a connection` / `RSA public key is not available client side` | MySQL 8 `caching_sha2_password` 完整认证需要 RSA 公钥；适配器已设 `allowPublicKeyRetrieval: true`（限本机/内网，跨公网请用 TLS） |

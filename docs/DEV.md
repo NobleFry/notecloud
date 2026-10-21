@@ -277,4 +277,5 @@ http.post(url, body, { headers: { 'Idempotency-Key': crypto.randomUUID() } })
 | 拉镜像超时 | 按上面配 Docker 守护进程代理 |
 | 3307 被占用 | 改 `.env` 的 `MYSQL_PORT`，同步改 `DATABASE_URL` |
 | MySQL 起不来 | `pnpm dev:db:logs` 看日志；换数据卷重来用 `pnpm dev:db:reset` |
+| MySQL 重启后 API 报 `RSA public key is not available client side` | MySQL 8 的 `caching_sha2_password` 在认证缓存为空时需要 RSA 公钥；`apps/api/src/db/prisma.ts` 已开启 `allowPublicKeyRetrieval`，重启 API 即可。若仍报错，先跑 `pnpm db:deploy` 预热一次认证 |
 | 想连系统 MariaDB | **不要**。行为不一致，会埋 ngram / 排序规则的坑 |

@@ -22,6 +22,12 @@ function createAdapter(): PrismaMariaDb {
     connectionLimit: 10,
     // acquireTimeout 与 Prisma 6 的 5s connect_timeout 对齐
     acquireTimeout: 5_000,
+    // MySQL 8 默认用 caching_sha2_password。第一次认证（或 MySQL 重启后
+    // 认证缓存被清空）时，驱动需要向服务端索取 RSA 公钥来加密密码；
+    // 不开启这项就会报 "RSA public key is not available client side"。
+    // 连接只走 127.0.0.1 或 compose 内网，开启的 MITM 风险可接受；
+    // 若数据库跨公网，应改用 TLS 而不是依赖这个开关。
+    allowPublicKeyRetrieval: true,
   });
 }
 

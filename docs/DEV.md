@@ -122,7 +122,7 @@ docker compose version
 ## 第二步：配置 .env
 
 ```bash
-cd /home/admin/Projects/NoteCloud
+cd notecloud
 cp .env.example .env
 ```
 

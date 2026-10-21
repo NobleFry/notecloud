@@ -25,7 +25,7 @@ function findUp(start: string, filename: string, maxDepth = 6): string | null {
  * 定位 .env。
  *
  * 不能写死"模块在 src/config 下往上跳 4 级" —— 打包成 dist/index.js 之后
- * 位置变了，那样会指到仓库外面去（曾经真的读到了 /home/admin/Projects/.env）。
+ * 位置变了，那样会指到仓库外面去（曾经真的读到了仓库外的 .env）。
  * 所以从 cwd 和模块位置分别往上找；都找不到就认为环境变量由容器注入（生产即如此）。
  */
 const envFile = findUp(process.cwd(), '.env') ?? findUp(here, '.env');
